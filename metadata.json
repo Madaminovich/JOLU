@@ -1,0 +1,7 @@
+{
+  "name": "Jolu 1.1.3",
+  "description": "A high-end B2B catalog for fabrics and garment hardware with visual search and Telegram order integration.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
