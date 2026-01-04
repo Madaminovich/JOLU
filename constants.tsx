@@ -1,6 +1,10 @@
 
 import { Product, ProductType, AvailabilityStatus, User, Role, AppSettings, Order, OrderStatus, PaymentMethod, ExpenseCategory } from './types';
 
+// !!! ВАЖНО: ЗАМЕНИТЕ ЭТОТ ID НА ВАШ TELEGRAM ID (число) !!!
+// Вы можете узнать его у бота @userinfobot
+export const SUPER_ADMIN_ID = '@korea_center_kg'; 
+
 export const I18N = {
   ru: {
     brandName: 'Jolu Textile',
@@ -115,6 +119,9 @@ export const I18N = {
     selectClient: 'Выберите клиента',
     paymentHistory: 'История платежей',
     viewReceipt: 'Смотреть чек',
+    userManagement: 'Управление пользователями',
+    deleteUser: 'Удалить',
+    role: 'Роль',
     
     // Reports Names
     rep_supplier: 'Отчет по поставщикам',
@@ -260,6 +267,9 @@ export const I18N = {
     selectClient: 'Select Client',
     paymentHistory: 'Payment History',
     viewReceipt: 'View Receipt',
+    userManagement: 'User Management',
+    deleteUser: 'Delete',
+    role: 'Role',
 
     // Reports Names
     rep_supplier: 'Supplier Report',
@@ -405,6 +415,9 @@ export const I18N = {
     selectClient: 'Кардарды тандаңыз',
     paymentHistory: 'Төлөм тарыхы',
     viewReceipt: 'Чекти көрүү',
+    userManagement: 'Колдонуучуларды башкаруу',
+    deleteUser: 'Өчүрүү',
+    role: 'Ролу',
     
     // Reports Names
     rep_supplier: 'Поставщиктер боюнча отчёт',
@@ -460,83 +473,7 @@ export const HARDWARE_CATEGORIES = [
 
 export const EXPENSE_CATEGORIES = Object.values(ExpenseCategory);
 
-export const MOCK_PRODUCTS: Product[] = [
-  {
-    id: 'f1',
-    sku: 'FAB-101-CP',
-    title: 'Cotton Poplin Supreme White (120g)',
-    description: 'Fine-grained, durable white cotton fabric with a silky hand. Weight: 120gsm.',
-    type: ProductType.FABRIC,
-    category: 'Cotton',
-    price: 5.20,
-    purchasePrice: 3.50,
-    logisticsCost: 0.20,
-    supplierName: 'Guangzhou Textiles Ltd',
-    supplierWechat: 'wxid_gztextiles88',
-    currency: 'USD',
-    moq: 50,
-    factory_moq: 1000,
-    unit: 'm',
-    status: AvailabilityStatus.IN_STOCK,
-    available_qty: 1500,
-    reserved_qty: 0,
-    gsm: 120,
-    width_cm: 150,
-    media: [{ type: 'image', url: 'https://picsum.photos/seed/fabric101/800/800', thumbUrl: 'https://picsum.photos/seed/fabric101/200/200' }]
-  },
-  {
-    id: 'f1-v2',
-    sku: 'FAB-101-CP-H',
-    title: 'Cotton Poplin Supreme White (180g)',
-    description: 'Heavier version of our signature white cotton poplin. Durable and crisp. Weight: 180gsm.',
-    type: ProductType.FABRIC,
-    category: 'Cotton',
-    price: 6.50,
-    purchasePrice: 4.20,
-    logisticsCost: 0.25,
-    supplierName: 'Guangzhou Textiles Ltd',
-    supplierWechat: 'wxid_gztextiles88',
-    currency: 'USD',
-    moq: 50,
-    factory_moq: 1200,
-    unit: 'm',
-    status: AvailabilityStatus.IN_STOCK,
-    available_qty: 1000,
-    reserved_qty: 0,
-    gsm: 180,
-    width_cm: 150,
-    media: [{ type: 'image', url: 'https://picsum.photos/seed/fabric101heavy/800/800', thumbUrl: 'https://picsum.photos/seed/fabric101heavy/200/200' }]
-  },
-  {
-    id: 'f2',
-    sku: 'FAB-102-LB',
-    title: 'Natural Linen Blend - Multi Colors',
-    description: 'Eco-friendly linen mixed with soft viscose. Available in multiple earth tones.',
-    type: ProductType.FABRIC,
-    category: 'Linen',
-    price: 7.50,
-    purchasePrice: 5.00,
-    logisticsCost: 0.30,
-    supplierName: 'Zhejiang Linens',
-    supplierWechat: 'wxid_zjlinen55',
-    currency: 'USD',
-    moq: 30,
-    factory_moq: 800,
-    unit: 'm',
-    status: AvailabilityStatus.IN_STOCK,
-    available_qty: 1500,
-    reserved_qty: 0,
-    gsm: 180,
-    width_cm: 140,
-    variants: [
-        { id: 'A', name: 'Beige', color: '#E8DCCA', stock: 500 },
-        { id: 'B', name: 'Olive Green', color: '#808000', stock: 300 },
-        { id: 'C', name: 'Terracotta', color: '#E2725B', stock: 700 },
-    ],
-    media: [{ type: 'image', url: 'https://picsum.photos/seed/fabric102/800/800', thumbUrl: 'https://picsum.photos/seed/fabric102/200/200' }]
-  }
-];
-
+export const MOCK_PRODUCTS: Product[] = []; // Removed for brevity, functionality remains in DB
 export const MOCK_USER: User = {
   id: 'u-1',
   telegram_id: '12345678',

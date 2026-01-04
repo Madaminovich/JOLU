@@ -1,8 +1,7 @@
-
 import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({
-  apiKey: import.meta.env.VITE_API_KEY
+  apiKey: process.env.API_KEY
 });
 
 export const analyzeProductImage = async (base64Image: string) => {

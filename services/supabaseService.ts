@@ -123,6 +123,39 @@ const mapExpenseToDB = (e: Expense) => ({
 // --- Services ---
 
 export const api = {
+  // AUTH
+  async loginOrRegister(telegramUser: any): Promise<User> {
+    const { data: existingUser } = await supabase.from('users').select('*').eq('telegram_id', String(telegramUser.id)).single();
+    
+    if (existingUser) {
+        // Update info if changed
+        const updated = {
+            ...existingUser,
+            username: telegramUser.username || existingUser.username,
+            name: [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(' ') || existingUser.name
+        };
+        await supabase.from('users').update({
+            username: updated.username,
+            name: updated.name
+        }).eq('id', existingUser.id);
+        return mapUserFromDB(updated);
+    } else {
+        // Create new user
+        const newUser: User = {
+            id: `u-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+            telegram_id: String(telegramUser.id),
+            username: telegramUser.username || '',
+            name: [telegramUser.first_name, telegramUser.last_name].filter(Boolean).join(' ') || 'New User',
+            brand: 'New Brand',
+            phone: '',
+            role: Role.USER, // Default role
+            balance: 0
+        };
+        await api.upsertUser(newUser);
+        return newUser;
+    }
+  },
+
   // PRODUCTS
   async getProducts() {
     const { data, error } = await supabase.from('products').select('*').order('created_at', { ascending: false });
@@ -162,6 +195,11 @@ export const api = {
   async upsertUser(user: User) {
     const { error } = await supabase.from('users').upsert(mapUserToDB(user));
     if (error) throw error;
+  },
+  
+  async deleteUser(userId: string) {
+      const { error } = await supabase.from('users').delete().eq('id', userId);
+      if (error) throw error;
   },
 
   // EXPENSES

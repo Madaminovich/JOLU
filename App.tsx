@@ -1,9 +1,8 @@
-
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { Layout } from './components/Layout';
 import { ProductCard } from './components/ProductCard';
 import { MediaSlider } from './components/MediaSlider';
-import { MOCK_PRODUCTS, MOCK_USER, MOCK_SETTINGS, I18N, FABRIC_CATEGORIES, HARDWARE_CATEGORIES, STATUS_COLORS, EXPENSE_CATEGORIES } from './constants';
+import { MOCK_PRODUCTS, MOCK_USER, MOCK_SETTINGS, I18N, FABRIC_CATEGORIES, HARDWARE_CATEGORIES, STATUS_COLORS, EXPENSE_CATEGORIES, SUPER_ADMIN_ID } from './constants';
 import { Product, Role, CartItem, OrderStatus, Order, AvailabilityStatus, AppSettings, CatalogType, ProductType, MediaItem, SearchLogType, PaymentProof, User, PaymentMethod, Expense, ExpenseCategory, ReportType, SearchLog, ProductVariant } from './types';
 import { findSimilarProducts } from './services/vectorService';
 import { trackEvent, getDashboardStats, exportToCSV, generateClientLedger } from './services/analyticsService';
@@ -17,6 +16,27 @@ const STORAGE_KEYS = {
 };
 
 const ITEMS_PER_PAGE = 30;
+
+// Type safety for Telegram WebApp
+declare global {
+  interface Window {
+    Telegram?: {
+      WebApp?: {
+        initDataUnsafe?: {
+          user?: {
+            id: number;
+            first_name: string;
+            last_name?: string;
+            username?: string;
+          }
+        };
+        ready: () => void;
+        expand: () => void;
+        openTelegramLink: (url: string) => void;
+      }
+    }
+  }
+}
 
 const App: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -89,10 +109,29 @@ const App: React.FC = () => {
   const [isImageViewerOpen, setIsImageViewerOpen] = useState(false);
 
   const t = I18N[lang];
+  const isManager = user.role === Role.MANAGER;
+  const isAdmin = user.role === Role.ADMIN || user.telegram_id === SUPER_ADMIN_ID;
+  const isSuperAdmin = user.telegram_id === SUPER_ADMIN_ID;
 
   // -- Initialization --
   useEffect(() => {
     const init = async () => {
+        // Telegram Auth
+        if (window.Telegram?.WebApp) {
+            window.Telegram.WebApp.ready();
+            window.Telegram.WebApp.expand();
+            const tgUser = window.Telegram.WebApp.initDataUnsafe?.user;
+            if (tgUser) {
+                const loggedUser = await api.loginOrRegister(tgUser);
+                // Override role if it is the SUPER ADMIN ID
+                if (String(tgUser.id) === SUPER_ADMIN_ID && loggedUser.role !== Role.ADMIN) {
+                    loggedUser.role = Role.ADMIN;
+                    await api.upsertUser(loggedUser);
+                }
+                setCurrentUserId(loggedUser.id);
+            }
+        }
+
         try {
             const [p, o, u, e, l] = await Promise.all([
                 api.getProducts(),
@@ -102,29 +141,23 @@ const App: React.FC = () => {
                 api.getSearchLogs()
             ]);
             
-            setProducts(p.length > 0 ? p : MOCK_PRODUCTS); // Fallback to mock only if DB empty
+            setProducts(p.length > 0 ? p : MOCK_PRODUCTS);
             setOrders(o);
             setExpenses(e);
             setSearchLogs(l);
+            setUsers(u);
+            
+            // Sync current user state if already loaded from DB
+            setUsers(prev => {
+                const me = prev.find(x => x.id === currentUserId);
+                if (me) setCurrentUserId(me.id);
+                return prev;
+            });
 
-            if (u.length > 0) {
-                // Ensure current mock user exists in DB or merge logic
-                const currentUserExists = u.find(x => x.id === MOCK_USER.id);
-                if (!currentUserExists) {
-                    await api.upsertUser(MOCK_USER);
-                    setUsers([...u, MOCK_USER]);
-                } else {
-                    setUsers(u);
-                }
-            } else {
-                 await api.upsertUser(MOCK_USER);
-                 setUsers([MOCK_USER]);
-            }
         } catch (err) {
             console.error("Supabase init failed", err);
-            // Fallback to mocks if no DB connection
+            // Fallback
             setProducts(MOCK_PRODUCTS);
-            setUsers([MOCK_USER]);
         }
     };
     init();
@@ -481,6 +514,9 @@ const App: React.FC = () => {
 
   const handleSaveProduct = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    // Manager cannot save product
+    if (isManager) return;
+
     const formData = new FormData(e.currentTarget);
     
     const productUpdate: Partial<Product> = {
@@ -564,6 +600,9 @@ const App: React.FC = () => {
   };
 
   const handleBatchDownload = async () => {
+    // Manager cannot download
+    if (isManager) return;
+
     const stats = getDashboardStats(orders, expenses);
     
     const download = (d: any[], n: string, t: string) => {
@@ -623,20 +662,29 @@ const App: React.FC = () => {
       window.open(`https://wa.me/${settings.contact.managerWA.replace(/\D/g, '')}`, '_blank');
     }
   };
+  
+  // Only for Super Admin to change others
+  const handleUserRoleChange = async (userId: string, newRole: Role) => {
+      if (!isSuperAdmin) return;
+      const updatedUser = users.find(u => u.id === userId);
+      if (updatedUser) {
+          updatedUser.role = newRole;
+          setUsers(prev => prev.map(u => u.id === userId ? updatedUser : u));
+          await api.upsertUser(updatedUser);
+      }
+  };
 
+  const handleDeleteUser = async (userId: string) => {
+      if (!isSuperAdmin) return;
+      if (confirm(`Are you sure you want to delete user?`)) {
+          setUsers(prev => prev.filter(u => u.id !== userId));
+          await api.deleteUser(userId);
+      }
+  };
+
+  // Deprecated for regular users, but kept for logic
   const handleRoleSwitch = (newRole: Role) => {
-    setUsers(prev => {
-        const next = prev.map(u => u.id === currentUserId ? { ...u, role: newRole } : u);
-        const updated = next.find(u => u.id === currentUserId);
-        if(updated) api.upsertUser(updated);
-        return next;
-    });
-    if (newRole === Role.USER) {
-        if (currentTab.startsWith('admin-')) setCurrentTab('catalog');
-        setCatalogType(null); 
-    } else {
-        if (!currentTab.startsWith('admin-')) setCurrentTab('admin-orders');
-    }
+    // Disable manual switch for non-dev, rely on DB role
   };
 
   const handleLangChange = (newLang: 'ru' | 'en' | 'ky') => {
@@ -662,7 +710,6 @@ const App: React.FC = () => {
   };
 
   // ... (Render Helpers like renderFullScreenImageViewer, renderProductDetail, etc. remain unchanged in logic)
-  // Re-pasting them here for completeness to ensure valid file structure, though logic is identical to previous version.
   
   const renderFullScreenImageViewer = () => {
      if (!isImageViewerOpen || !selectedProduct) return null;
@@ -765,6 +812,7 @@ const App: React.FC = () => {
                         {!selectedVariant && <p className="text-xs text-red-500 font-bold mt-2">← {t.selectColor}</p>}
                     </div>
                 )}
+                {/* ... existing detailed view logic ... */}
                 <div className="mb-4 flex-shrink-0">
                    <div className="flex bg-gray-100 rounded-xl p-1 mb-3">
                        <button onClick={() => setWantsFactoryOnly(false)} className={`flex-1 py-3 rounded-lg text-[10px] font-black uppercase transition-all flex items-center justify-center gap-1 ${!wantsFactoryOnly ? 'bg-blue-600 text-white shadow-md' : 'text-gray-500 hover:bg-gray-200'}`}>{t.stockOrder} (FAST)</button>
@@ -868,7 +916,7 @@ const App: React.FC = () => {
                         </div>
                         {isExpanded && (
                             <div className="bg-gray-50 border-t border-gray-100 p-4 space-y-4 animate-slide-up">
-                                {user.role === Role.ADMIN && (
+                                {(isAdmin || isManager) && (
                                     <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-sm">
                                         <h4 className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-2">{t.checkCustomer}</h4>
                                         <div className="space-y-1">
@@ -906,7 +954,7 @@ const App: React.FC = () => {
                                     })}
                                 </div>
                                 <div className="flex gap-2">
-                                   {user.role === Role.ADMIN ? (
+                                   {(isAdmin || isManager) ? (
                                        <select value={order.status} onClick={(e) => e.stopPropagation()} onChange={(e) => updateOrderStatus(order.id, e.target.value as OrderStatus)} className="flex-1 bg-white border border-gray-200 text-xs font-bold rounded-xl py-3 px-3 shadow-sm">
                                             {Object.values(OrderStatus).map(s => <option key={s} value={s}>{s}</option>)}
                                        </select>
@@ -923,7 +971,7 @@ const App: React.FC = () => {
                                             <span className="text-[8px] font-bold text-gray-400 uppercase tracking-widest">{t.amountPaid}</span>
                                             <span className={`text-xs font-black ${order.paidAmount >= order.totalAmount ? 'text-green-500' : 'text-orange-500'}`}>${order.paidAmount.toFixed(2)} / ${order.totalAmount.toFixed(2)}</span>
                                         </div>
-                                        {user.role === Role.ADMIN && order.paidAmount < order.totalAmount && (
+                                        {(isAdmin || isManager) && order.paidAmount < order.totalAmount && (
                                              <button onClick={(e) => { e.stopPropagation(); setEditingPaymentId(null); setPaymentAmount(''); setPendingPaymentPhoto(null); setActiveOrderForPayment(order); }} className="bg-green-600 text-white px-4 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md active:scale-95 transition-transform">+ Payment</button>
                                         )}
                                         {activeOrderForPayment?.id === order.id && (
@@ -955,7 +1003,7 @@ const App: React.FC = () => {
                                                     <div className="flex items-center gap-2">
                                                         <span className="bg-gray-100 text-gray-600 px-2 py-1 rounded-lg text-[8px] font-bold uppercase">{proof.method}</span>
                                                         {proof.fileUrl && <button onClick={() => setViewingReceiptUrl(proof.fileUrl || null)} className="text-blue-600 font-bold text-[9px] uppercase border border-blue-100 bg-white px-2 py-1 rounded-lg shadow-sm hover:bg-blue-50 transition-colors">📎 {t.viewReceipt}</button>}
-                                                        {user.role === Role.ADMIN && <button onClick={(e) => { e.stopPropagation(); setActiveOrderForPayment(order); setEditingPaymentId(proof.id); setPaymentAmount(proof.amount.toString()); setPaymentMethod(proof.method); setPendingPaymentPhoto(proof.fileUrl || null); }} className="text-gray-400 hover:text-blue-600 text-sm p-1">✏️</button>}
+                                                        {(isAdmin || isManager) && <button onClick={(e) => { e.stopPropagation(); setActiveOrderForPayment(order); setEditingPaymentId(proof.id); setPaymentAmount(proof.amount.toString()); setPaymentMethod(proof.method); setPendingPaymentPhoto(proof.fileUrl || null); }} className="text-gray-400 hover:text-blue-600 text-sm p-1">✏️</button>}
                                                     </div>
                                                  </div>
                                                ))}
@@ -977,73 +1025,97 @@ const App: React.FC = () => {
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-fade-in">
            <form onSubmit={handleSaveProduct} className="bg-white w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-[32px] p-6 space-y-4 relative">
               <div className="flex justify-between items-center mb-2">
-                  <h2 className="text-xl font-black text-gray-900">{editingProduct ? t.edit : t.add} Product</h2>
+                  <h2 className="text-xl font-black text-gray-900">{isManager ? 'View Product' : (editingProduct ? t.edit : t.add)}</h2>
                   <button type="button" onClick={() => setIsProductModalOpen(false)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">✕</button>
               </div>
-              <div className="flex gap-2 mb-4 bg-gray-100 p-1 rounded-xl">
-                  <button type="button" onClick={() => setModalProductType(ProductType.FABRIC)} className={`flex-1 py-2 rounded-lg text-xs font-bold ${modalProductType === ProductType.FABRIC ? 'bg-white shadow-sm' : 'text-gray-500'}`}>{t.fabrics}</button>
-                  <button type="button" onClick={() => setModalProductType(ProductType.HARDWARE)} className={`flex-1 py-2 rounded-lg text-xs font-bold ${modalProductType === ProductType.HARDWARE ? 'bg-white shadow-sm' : 'text-gray-500'}`}>{t.hardware}</button>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                  <input name="sku" defaultValue={editingProduct?.sku} placeholder={t.sku} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                  <input name="title" defaultValue={editingProduct?.title} placeholder={t.title} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              </div>
-              <textarea name="description" defaultValue={editingProduct?.description} placeholder={t.description} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold resize-none h-20"/>
-              <div className="grid grid-cols-3 gap-3">
-                 <input name="price" type="number" step="0.01" defaultValue={editingProduct?.price} placeholder={t.price} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                 <input name="purchasePrice" type="number" step="0.01" defaultValue={editingProduct?.purchasePrice} placeholder={t.purchasePrice} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                 <input name="logisticsCost" type="number" step="0.01" defaultValue={editingProduct?.logisticsCost} placeholder={t.logistics} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                  <input name="supplierName" defaultValue={editingProduct?.supplierName} placeholder={t.supplier} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                  <input name="supplierWechat" defaultValue={editingProduct?.supplierWechat} placeholder={t.supplierWechat} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                  <input name="moq" type="number" defaultValue={editingProduct?.moq} placeholder={t.minOrder} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                  <input name="factory_moq" type="number" defaultValue={editingProduct?.factory_moq} placeholder={t.factoryMinOrder} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              </div>
-              <div className="flex gap-2 items-center">
-                  {isCustomCategory ? (
-                      <input name="category" defaultValue={editingProduct?.category} placeholder={t.category} className="flex-1 bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" autoFocus />
-                  ) : (
-                      <select name="category" defaultValue={editingProduct?.category} className="flex-1 bg-gray-50 border-none rounded-xl p-3 text-xs font-bold">
-                          {(modalProductType === ProductType.FABRIC ? FABRIC_CATEGORIES : HARDWARE_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
-                      </select>
-                  )}
-                  <button type="button" onClick={() => setIsCustomCategory(!isCustomCategory)} className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg transition-colors ${isCustomCategory ? 'bg-red-100 text-red-500' : 'bg-blue-100 text-blue-600'}`}>{isCustomCategory ? '✕' : '+'}</button>
-              </div>
-              {modalProductType === ProductType.FABRIC && (
-                  <div className="grid grid-cols-2 gap-4">
-                      <input name="gsm" type="number" defaultValue={editingProduct?.gsm} placeholder={t.gsm} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                      <input name="width_cm" type="number" defaultValue={editingProduct?.width_cm} placeholder={t.width} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-                  </div>
-              )}
-              <input name="available_qty" type="number" defaultValue={editingProduct?.available_qty} placeholder={t.availableQty} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              <div className="space-y-2 bg-gray-50 p-3 rounded-xl">
-                  <div className="flex justify-between items-center"><span className="text-[10px] font-black uppercase text-gray-400">{t.variant}s</span><button type="button" onClick={handleAddVariant} className="text-[10px] font-bold text-blue-600">+ {t.addVariant}</button></div>
-                  {adminVariants.map((v, i) => (
-                      <div key={i} className="flex gap-2 items-center">
-                          <input type="color" name={`var_color_${i}`} defaultValue={v.color} className="w-8 h-8 rounded overflow-hidden border-none p-0" />
-                          <input name={`var_name_${i}`} defaultValue={v.name} placeholder="Name" className="flex-1 bg-white border-none rounded-lg p-2 text-xs" />
-                          <input name={`var_stock_${i}`} type="number" defaultValue={v.stock} placeholder="Stock" className="w-20 bg-white border-none rounded-lg p-2 text-xs" />
-                          <button type="button" onClick={() => setAdminVariants(prev => prev.filter((_, idx) => idx !== i))} className="text-red-500 px-2">×</button>
-                      </div>
-                  ))}
-              </div>
-              <div onClick={() => adminPhotoInputRef.current?.click()} className="border-2 border-dashed border-gray-200 rounded-xl p-4 flex flex-col items-center justify-center text-gray-400 gap-1 cursor-pointer hover:bg-gray-50 transition-colors">
-                 <span className="text-2xl">🖼️</span><span className="text-[10px] font-bold uppercase">Upload Images</span>
-                 <input ref={adminPhotoInputRef} type="file" multiple className="hidden" accept="image/*" onChange={handleAdminMediaUpload} />
-              </div>
-              <input name="youtubeId" placeholder={t.youtubeLink} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
-              <div className="flex gap-2 overflow-x-auto pb-2">
-                 {adminMediaItems.map((m, idx) => (
-                     <div key={idx} className="w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0 relative overflow-hidden group">
-                         <img src={m.thumbUrl || m.url} className="w-full h-full object-cover" alt="prev"/>
-                         <button type="button" onClick={() => setAdminMediaItems(prev => prev.filter((_, i) => i !== idx))} className="absolute top-0 right-0 bg-red-500 text-white w-5 h-5 flex items-center justify-center text-xs">×</button>
+              
+              {/* Manager View - Read Only / No Cost Data */}
+              {isManager ? (
+                 <div className="space-y-4">
+                     <div className="w-full bg-gray-100 h-48 rounded-xl overflow-hidden"><img src={editingProduct?.media?.[0]?.url} className="w-full h-full object-cover"/></div>
+                     <div className="grid grid-cols-2 gap-4">
+                         <div><p className="text-[10px] uppercase text-gray-400">{t.sku}</p><p className="font-bold">{editingProduct?.sku}</p></div>
+                         <div><p className="text-[10px] uppercase text-gray-400">{t.title}</p><p className="font-bold">{editingProduct?.title}</p></div>
                      </div>
-                 ))}
-              </div>
-              <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-black uppercase shadow-lg shadow-blue-200">{t.save}</button>
+                     <div><p className="text-[10px] uppercase text-gray-400">{t.price}</p><p className="font-bold text-xl text-blue-600">${editingProduct?.price}</p></div>
+                     <div><p className="text-[10px] uppercase text-gray-400">{t.availableQty}</p><p className="font-bold text-green-600">{editingProduct?.available_qty} {editingProduct?.unit}</p></div>
+                     <div><p className="text-[10px] uppercase text-gray-400">{t.description}</p><p className="text-sm">{editingProduct?.description}</p></div>
+                     <div className="bg-gray-50 p-2 rounded-xl">
+                         <p className="text-[10px] font-bold mb-2">VARIANTS</p>
+                         {editingProduct?.variants?.map(v => (
+                             <div key={v.id} className="flex justify-between text-xs border-b border-gray-200 py-1"><span>{v.name} ({v.id})</span><span>{v.stock}</span></div>
+                         ))}
+                     </div>
+                 </div>
+              ) : (
+                /* Admin View - Full Edit */
+                <>
+                  <div className="flex gap-2 mb-4 bg-gray-100 p-1 rounded-xl">
+                      <button type="button" onClick={() => setModalProductType(ProductType.FABRIC)} className={`flex-1 py-2 rounded-lg text-xs font-bold ${modalProductType === ProductType.FABRIC ? 'bg-white shadow-sm' : 'text-gray-500'}`}>{t.fabrics}</button>
+                      <button type="button" onClick={() => setModalProductType(ProductType.HARDWARE)} className={`flex-1 py-2 rounded-lg text-xs font-bold ${modalProductType === ProductType.HARDWARE ? 'bg-white shadow-sm' : 'text-gray-500'}`}>{t.hardware}</button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                      <input name="sku" defaultValue={editingProduct?.sku} placeholder={t.sku} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                      <input name="title" defaultValue={editingProduct?.title} placeholder={t.title} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  </div>
+                  <textarea name="description" defaultValue={editingProduct?.description} placeholder={t.description} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold resize-none h-20"/>
+                  <div className="grid grid-cols-3 gap-3">
+                    <input name="price" type="number" step="0.01" defaultValue={editingProduct?.price} placeholder={t.price} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                    <input name="purchasePrice" type="number" step="0.01" defaultValue={editingProduct?.purchasePrice} placeholder={t.purchasePrice} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                    <input name="logisticsCost" type="number" step="0.01" defaultValue={editingProduct?.logisticsCost} placeholder={t.logistics} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                      <input name="supplierName" defaultValue={editingProduct?.supplierName} placeholder={t.supplier} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                      <input name="supplierWechat" defaultValue={editingProduct?.supplierWechat} placeholder={t.supplierWechat} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                      <input name="moq" type="number" defaultValue={editingProduct?.moq} placeholder={t.minOrder} required className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                      <input name="factory_moq" type="number" defaultValue={editingProduct?.factory_moq} placeholder={t.factoryMinOrder} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  </div>
+                  <div className="flex gap-2 items-center">
+                      {isCustomCategory ? (
+                          <input name="category" defaultValue={editingProduct?.category} placeholder={t.category} className="flex-1 bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" autoFocus />
+                      ) : (
+                          <select name="category" defaultValue={editingProduct?.category} className="flex-1 bg-gray-50 border-none rounded-xl p-3 text-xs font-bold">
+                              {(modalProductType === ProductType.FABRIC ? FABRIC_CATEGORIES : HARDWARE_CATEGORIES).map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                      )}
+                      <button type="button" onClick={() => setIsCustomCategory(!isCustomCategory)} className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg transition-colors ${isCustomCategory ? 'bg-red-100 text-red-500' : 'bg-blue-100 text-blue-600'}`}>{isCustomCategory ? '✕' : '+'}</button>
+                  </div>
+                  {modalProductType === ProductType.FABRIC && (
+                      <div className="grid grid-cols-2 gap-4">
+                          <input name="gsm" type="number" defaultValue={editingProduct?.gsm} placeholder={t.gsm} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                          <input name="width_cm" type="number" defaultValue={editingProduct?.width_cm} placeholder={t.width} className="bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                      </div>
+                  )}
+                  <input name="available_qty" type="number" defaultValue={editingProduct?.available_qty} placeholder={t.availableQty} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  <div className="space-y-2 bg-gray-50 p-3 rounded-xl">
+                      <div className="flex justify-between items-center"><span className="text-[10px] font-black uppercase text-gray-400">{t.variant}s</span><button type="button" onClick={handleAddVariant} className="text-[10px] font-bold text-blue-600">+ {t.addVariant}</button></div>
+                      {adminVariants.map((v, i) => (
+                          <div key={i} className="flex gap-2 items-center">
+                              <input type="color" name={`var_color_${i}`} defaultValue={v.color} className="w-8 h-8 rounded overflow-hidden border-none p-0" />
+                              <input name={`var_name_${i}`} defaultValue={v.name} placeholder="Name" className="flex-1 bg-white border-none rounded-lg p-2 text-xs" />
+                              <input name={`var_stock_${i}`} type="number" defaultValue={v.stock} placeholder="Stock" className="w-20 bg-white border-none rounded-lg p-2 text-xs" />
+                              <button type="button" onClick={() => setAdminVariants(prev => prev.filter((_, idx) => idx !== i))} className="text-red-500 px-2">×</button>
+                          </div>
+                      ))}
+                  </div>
+                  <div onClick={() => adminPhotoInputRef.current?.click()} className="border-2 border-dashed border-gray-200 rounded-xl p-4 flex flex-col items-center justify-center text-gray-400 gap-1 cursor-pointer hover:bg-gray-50 transition-colors">
+                    <span className="text-2xl">🖼️</span><span className="text-[10px] font-bold uppercase">Upload Images</span>
+                    <input ref={adminPhotoInputRef} type="file" multiple className="hidden" accept="image/*" onChange={handleAdminMediaUpload} />
+                  </div>
+                  <input name="youtubeId" placeholder={t.youtubeLink} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
+                  <div className="flex gap-2 overflow-x-auto pb-2">
+                    {adminMediaItems.map((m, idx) => (
+                        <div key={idx} className="w-16 h-16 rounded-lg bg-gray-100 flex-shrink-0 relative overflow-hidden group">
+                            <img src={m.thumbUrl || m.url} className="w-full h-full object-cover" alt="prev"/>
+                            <button type="button" onClick={() => setAdminMediaItems(prev => prev.filter((_, i) => i !== idx))} className="absolute top-0 right-0 bg-red-500 text-white w-5 h-5 flex items-center justify-center text-xs">×</button>
+                        </div>
+                    ))}
+                  </div>
+                  <button type="submit" className="w-full bg-blue-600 text-white py-4 rounded-xl font-black uppercase shadow-lg shadow-blue-200">{t.save}</button>
+                </>
+              )}
            </form>
         </div>
     );
@@ -1068,74 +1140,103 @@ const App: React.FC = () => {
     </div>
   );
 
-  const renderReportsModal = () => {
-    const reportOptions = [
-        { id: ReportType.SUPPLIER, label: t.rep_supplier },
-        { id: ReportType.CLIENTS, label: t.rep_clients },
-        { id: ReportType.CLIENT_LEDGER, label: t.rep_client_ledger },
-        { id: ReportType.SALES_ALL, label: t.rep_sales_all },
-        { id: ReportType.SALES_FABRIC, label: t.rep_sales_fabric },
-        { id: ReportType.SALES_HARDWARE, label: t.rep_sales_hardware },
-        { id: ReportType.EXPENSES, label: t.rep_expenses },
-        { id: ReportType.INCOME, label: t.rep_income },
-        { id: ReportType.INVENTORY, label: t.rep_inventory },
-        { id: ReportType.SEARCH_LOGS, label: t.rep_search_logs },
-    ];
-    const toggleReport = (id: ReportType) => {
-        const next = new Set(selectedReports);
-        if (next.has(id)) next.delete(id); else next.add(id);
-        setSelectedReports(next);
-    };
-    return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-fade-in">
-           <div className="bg-white w-full max-w-sm rounded-[32px] p-6 space-y-4 max-h-[85vh] overflow-y-auto">
-               <div className="flex justify-between items-center"><h2 className="text-xl font-black text-gray-900">{t.reports}</h2><button onClick={() => setIsReportsModalOpen(false)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">✕</button></div>
-               <div>
-                   <label className="text-[9px] font-black text-gray-400 uppercase tracking-widest block mb-1">{t.selectClient}</label>
-                   <select value={reportClient} onChange={(e) => setReportClient(e.target.value)} className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold">
-                       <option value="ALL">{t.allClients}</option>
-                       {users.filter(u => u.role === Role.USER).map(u => <option key={u.id} value={u.id}>{u.name} ({u.brand})</option>)}
-                   </select>
-               </div>
-               <p className="text-xs text-gray-400 font-bold">{t.selectReports}</p>
-               <div className="space-y-2">{reportOptions.map(opt => (
-                   <button key={opt.id} onClick={() => toggleReport(opt.id)} className={`w-full p-3 rounded-xl flex items-center justify-between transition-colors ${selectedReports.has(opt.id) ? 'bg-blue-50 border border-blue-200 text-blue-800' : 'bg-gray-50 border border-transparent text-gray-600'}`}><span className="text-xs font-bold text-left">{opt.label}</span>{selectedReports.has(opt.id) && <span className="text-blue-600">✓</span>}</button>
-               ))}</div>
-               <div className="flex gap-2 pt-2"><button onClick={() => setSelectedReports(new Set())} className="px-4 bg-gray-100 text-gray-500 rounded-xl text-[10px] font-black uppercase">{t.reset}</button><button onClick={handleBatchDownload} disabled={selectedReports.size === 0} className="flex-1 bg-gray-900 text-white py-3 rounded-xl font-black uppercase shadow-lg disabled:opacity-50">Download ({selectedReports.size})</button></div>
-           </div>
+  const renderReportsModal = () => (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-fade-in" onClick={() => setIsReportsModalOpen(false)}>
+      <div className="bg-white w-full max-w-sm rounded-[32px] p-6 space-y-4 shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex justify-between items-center">
+            <h2 className="text-xl font-black text-gray-900">{t.reportsCenter}</h2>
+            <button onClick={() => setIsReportsModalOpen(false)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">✕</button>
         </div>
-    );
-  };
+        <p className="text-xs text-gray-500 font-bold">{t.selectReports}</p>
+        <div className="max-h-[50vh] overflow-y-auto space-y-2 pr-2">
+            {Object.values(ReportType).map(rt => (
+                <label key={rt} className="flex items-center gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50 hover:bg-blue-50 transition-colors cursor-pointer">
+                    <input 
+                        type="checkbox" 
+                        checked={selectedReports.has(rt)} 
+                        onChange={() => {
+                            const next = new Set(selectedReports);
+                            if (next.has(rt)) next.delete(rt);
+                            else next.add(rt);
+                            setSelectedReports(next);
+                        }}
+                        className="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span className="text-xs font-bold uppercase text-gray-700">{t[`rep_${rt.toLowerCase()}` as keyof typeof t] || rt}</span>
+                </label>
+            ))}
+        </div>
+        
+        {selectedReports.has(ReportType.CLIENT_LEDGER) && (
+            <div className="bg-blue-50 p-3 rounded-xl border border-blue-100">
+                <p className="text-[10px] font-black uppercase text-blue-600 mb-2">{t.selectClient}</p>
+                <select value={reportClient} onChange={(e) => setReportClient(e.target.value)} className="w-full bg-white border-none rounded-lg p-2 text-xs font-bold">
+                    <option value="ALL">{t.allClients}</option>
+                    {users.map(u => <option key={u.id} value={u.id}>{u.name} ({u.brand})</option>)}
+                </select>
+            </div>
+        )}
+
+        <div className="flex gap-2 pt-2">
+            <button onClick={() => setSelectedReports(new Set(Object.values(ReportType)))} className="flex-1 py-2 bg-gray-100 rounded-xl text-[10px] font-black uppercase text-gray-500">{t.selectAll}</button>
+            <button onClick={() => setSelectedReports(new Set())} className="flex-1 py-2 bg-gray-100 rounded-xl text-[10px] font-black uppercase text-gray-500">{t.deselectAll}</button>
+        </div>
+        
+        <button onClick={handleBatchDownload} disabled={selectedReports.size === 0} className="w-full bg-gray-900 text-white py-4 rounded-xl font-black uppercase shadow-lg disabled:opacity-50 disabled:shadow-none">
+            {t.downloadSelected} ({selectedReports.size})
+        </button>
+      </div>
+    </div>
+  );
 
   const renderExpenseDetailModal = () => {
-     if (!viewingExpense) return null;
-     return (
+      if (!viewingExpense) return null;
+      return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-center justify-center p-4 animate-fade-in" onClick={() => setViewingExpense(null)}>
-            <div className="bg-white w-full max-w-sm rounded-[32px] p-6 space-y-4" onClick={e => e.stopPropagation()}>
-                <div className="flex justify-between items-start"><div><p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">{t.expenseDetails}</p><h2 className="text-xl font-black text-gray-900 mt-1">{viewingExpense.title}</h2></div><button onClick={() => setViewingExpense(null)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">✕</button></div>
-                <div className="bg-gray-50 p-4 rounded-2xl">
-                    <div className="grid grid-cols-2 gap-4">
-                        <div><p className="text-[9px] font-bold text-gray-400 uppercase">{t.amount}</p><p className="text-lg font-black text-gray-900">${viewingExpense.amount.toFixed(2)}</p></div>
-                        <div><p className="text-[9px] font-bold text-gray-400 uppercase">{t.date}</p><p className="text-sm font-bold text-gray-900">{new Date(viewingExpense.date).toLocaleDateString()}</p></div>
-                        <div><p className="text-[9px] font-bold text-gray-400 uppercase">{t.category}</p><p className="text-sm font-bold text-gray-900">{viewingExpense.category}</p></div>
+            <div className="bg-white w-full max-w-sm rounded-[32px] p-6 space-y-4 relative" onClick={(e) => e.stopPropagation()}>
+                <div className="flex justify-between items-start">
+                    <div>
+                        <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">{t.expenseDetails}</p>
+                        <h2 className="text-xl font-black text-gray-900 mt-1">{viewingExpense.title}</h2>
+                    </div>
+                    <button onClick={() => setViewingExpense(null)} className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500">✕</button>
+                </div>
+                
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 space-y-3">
+                    <div className="flex justify-between border-b border-gray-200 pb-2">
+                        <span className="text-xs text-gray-500 font-bold">{t.amount}</span>
+                        <span className="text-lg font-black text-red-500">-${viewingExpense.amount.toFixed(2)}</span>
+                    </div>
+                    <div className="flex justify-between border-b border-gray-200 pb-2">
+                        <span className="text-xs text-gray-500 font-bold">{t.category}</span>
+                        <span className="text-xs font-bold bg-white px-2 py-1 rounded border border-gray-200">{viewingExpense.category}</span>
+                    </div>
+                    <div className="flex justify-between">
+                        <span className="text-xs text-gray-500 font-bold">{t.date}</span>
+                        <span className="text-xs font-bold text-gray-900">{new Date(viewingExpense.date).toLocaleDateString()}</span>
                     </div>
                 </div>
-                {viewingExpense.receiptUrl && <div className="rounded-xl overflow-hidden border border-gray-100"><img src={viewingExpense.receiptUrl} className="w-full object-contain" alt="Receipt" /></div>}
+
+                {viewingExpense.receiptUrl && (
+                    <div className="space-y-2">
+                        <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest">{t.receipt}</p>
+                        <div className="rounded-xl overflow-hidden border border-gray-100 bg-gray-50" onClick={() => setViewingReceiptUrl(viewingExpense.receiptUrl || null)}>
+                            <img src={viewingExpense.receiptUrl} className="w-full h-48 object-cover" alt="Receipt" />
+                        </div>
+                    </div>
+                )}
             </div>
         </div>
-     );
+      );
   };
 
-  const renderAnalysisOverlay = () => {
-     if (!isPhotoSearching) return null;
-     return (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex flex-col items-center justify-center text-white animate-fade-in">
-           <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4" />
-           <p className="text-lg font-black tracking-widest uppercase animate-pulse">{t.analyzing}</p>
-           <p className="text-xs text-white/50 font-bold mt-2">{t.analyzingText}</p>
-        </div>
-     );
-  };
+  const renderAnalysisOverlay = () => (
+      <div className="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] flex flex-col items-center justify-center p-6 text-white text-center animate-fade-in">
+          <div className="w-20 h-20 border-4 border-white/20 border-t-white rounded-full animate-spin mb-6"></div>
+          <h2 className="text-2xl font-black mb-2">{t.analyzing}</h2>
+          <p className="text-sm opacity-70 font-bold">{t.analyzingText}</p>
+      </div>
+  );
 
   const renderFullContent = () => {
       switch (currentTab) {
@@ -1248,10 +1349,11 @@ const App: React.FC = () => {
                  {renderOrderList(orders.filter(o => o.userId === user.id))}
                  {orders.filter(o => o.userId === user.id).length === 0 && <div className="text-center py-10 opacity-50"><span className="text-4xl block mb-2">📦</span><p className="text-sm font-bold text-gray-400">{t.historyEmpty}</p></div>}
              </div>
-             <div className="bg-gray-50 p-6 rounded-[32px] border border-gray-100">
+             {/* Hide manual switch for prod */}
+             {isAdmin && <div className="bg-gray-50 p-6 rounded-[32px] border border-gray-100">
                  <h3 className="text-lg font-black text-gray-900 mb-4">{t.settings}</h3>
                  <button onClick={() => handleRoleSwitch(Role.ADMIN)} className="w-full bg-white border border-gray-200 p-4 rounded-xl text-left shadow-sm flex justify-between items-center group"><span className="font-bold text-gray-700">{t.switchRole} (Dev)</span><span className="text-gray-300 group-hover:text-blue-600 transition-colors">→</span></button>
-             </div>
+             </div>}
           </div>
         );
 
@@ -1268,7 +1370,8 @@ const App: React.FC = () => {
               <div className="pb-24">
                   <div className="flex justify-between items-center mb-6 px-1">
                       <h1 className="text-2xl font-black text-gray-900">{t.stock}</h1>
-                      <button onClick={() => { setEditingProduct(null); setAdminMediaItems([]); setAdminVariants([]); setIsProductModalOpen(true); setIsCustomCategory(false); }} className="bg-blue-600 text-white w-10 h-10 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200 active:scale-95 transition-transform text-xl font-bold">+</button>
+                      {/* Manager cannot add products */}
+                      {!isManager && <button onClick={() => { setEditingProduct(null); setAdminMediaItems([]); setAdminVariants([]); setIsProductModalOpen(true); setIsCustomCategory(false); }} className="bg-blue-600 text-white w-10 h-10 rounded-xl flex items-center justify-center shadow-lg shadow-blue-200 active:scale-95 transition-transform text-xl font-bold">+</button>}
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                       {products.map(p => (
@@ -1301,22 +1404,32 @@ const App: React.FC = () => {
                    <h1 className="text-2xl font-black text-gray-900 px-1">{t.stats}</h1>
                    <div className="grid grid-cols-2 gap-4">
                        <div className="bg-blue-600 text-white p-5 rounded-[24px] shadow-lg shadow-blue-200"><p className="text-[10px] font-black uppercase opacity-60 mb-1">{t.revenue}</p><p className="text-2xl font-black">${stats.revenue.toFixed(2)}</p></div>
-                       <div className="bg-green-500 text-white p-5 rounded-[24px] shadow-lg shadow-green-200"><p className="text-[10px] font-black uppercase opacity-60 mb-1">{t.netProfit}</p><p className="text-2xl font-black">${stats.netProfit.toFixed(2)}</p></div>
+                       
+                       {/* Manager does not see profit */}
+                       {!isManager && <div className="bg-green-500 text-white p-5 rounded-[24px] shadow-lg shadow-green-200"><p className="text-[10px] font-black uppercase opacity-60 mb-1">{t.netProfit}</p><p className="text-2xl font-black">${stats.netProfit.toFixed(2)}</p></div>}
+                       
                        <div className="bg-white border border-gray-100 p-5 rounded-[24px]"><p className="text-[10px] font-black uppercase text-gray-400 mb-1">{t.avgCheck}</p><p className="text-xl font-black text-gray-900">${stats.avgCheck.toFixed(2)}</p></div>
-                       <div className="bg-white border border-gray-100 p-5 rounded-[24px]"><p className="text-[10px] font-black uppercase text-gray-400 mb-1">{t.expenses}</p><p className="text-xl font-black text-red-500">-${stats.totalExpenses.toFixed(2)}</p></div>
+                       
+                       {/* Manager does not see expenses */}
+                       {!isManager && <div className="bg-white border border-gray-100 p-5 rounded-[24px]"><p className="text-[10px] font-black uppercase text-gray-400 mb-1">{t.expenses}</p><p className="text-xl font-black text-red-500">-${stats.totalExpenses.toFixed(2)}</p></div>}
                    </div>
-                   <button onClick={() => setIsReportsModalOpen(true)} className="w-full bg-gray-900 text-white p-5 rounded-[24px] flex justify-between items-center shadow-lg"><span className="font-bold">{t.reportsCenter}</span><span className="text-2xl">📊</span></button>
-                   <div>
-                       <div className="flex justify-between items-center mb-4 px-1"><h3 className="text-lg font-black text-gray-900">{t.expenses}</h3><button onClick={() => setIsExpenseModalOpen(true)} className="text-[10px] font-bold bg-gray-100 px-3 py-1.5 rounded-lg text-gray-600">+ {t.add}</button></div>
-                       <div className="space-y-2">
-                           {expenses.slice(0, 5).map(exp => (
-                               <div key={exp.id} onClick={() => setViewingExpense(exp)} className="bg-white p-3 rounded-2xl border border-gray-100 flex justify-between items-center">
-                                   <div><p className="text-xs font-bold text-gray-900">{exp.title}</p><p className="text-[9px] font-bold text-gray-400">{new Date(exp.date).toLocaleDateString()} • {exp.category}</p></div>
-                                   <span className="text-sm font-black text-gray-900">-${exp.amount.toFixed(2)}</span>
-                               </div>
-                           ))}
+                   
+                   {/* Manager does not access reports */}
+                   {!isManager && <button onClick={() => setIsReportsModalOpen(true)} className="w-full bg-gray-900 text-white p-5 rounded-[24px] flex justify-between items-center shadow-lg"><span className="font-bold">{t.reportsCenter}</span><span className="text-2xl">📊</span></button>}
+                   
+                   {!isManager && (
+                       <div>
+                           <div className="flex justify-between items-center mb-4 px-1"><h3 className="text-lg font-black text-gray-900">{t.expenses}</h3><button onClick={() => setIsExpenseModalOpen(true)} className="text-[10px] font-bold bg-gray-100 px-3 py-1.5 rounded-lg text-gray-600">+ {t.add}</button></div>
+                           <div className="space-y-2">
+                               {expenses.slice(0, 5).map(exp => (
+                                   <div key={exp.id} onClick={() => setViewingExpense(exp)} className="bg-white p-3 rounded-2xl border border-gray-100 flex justify-between items-center">
+                                       <div><p className="text-xs font-bold text-gray-900">{exp.title}</p><p className="text-[9px] font-bold text-gray-400">{new Date(exp.date).toLocaleDateString()} • {exp.category}</p></div>
+                                       <span className="text-sm font-black text-gray-900">-${exp.amount.toFixed(2)}</span>
+                                   </div>
+                               ))}
+                           </div>
                        </div>
-                   </div>
+                   )}
               </div>
           );
 
@@ -1331,9 +1444,46 @@ const App: React.FC = () => {
                           <input name="managerTG" defaultValue={settings.contact.managerTG} placeholder="Telegram Username (no @)" className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold mb-2" />
                           <input name="managerWA" defaultValue={settings.contact.managerWA} placeholder="WhatsApp Number" className="w-full bg-gray-50 border-none rounded-xl p-3 text-xs font-bold" />
                       </div>
-                      <button type="button" onClick={() => handleRoleSwitch(Role.USER)} className="w-full bg-red-50 text-red-500 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest">{t.clientView}</button>
                       <button type="submit" className="w-full bg-blue-600 text-white py-3 rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-blue-200">{t.save}</button>
                   </form>
+                  
+                  {/* Super Admin User Management */}
+                  {isSuperAdmin && (
+                      <div className="mt-8">
+                           <h2 className="text-xl font-black text-gray-900 mb-4 px-1">{t.userManagement}</h2>
+                           <div className="space-y-3">
+                               {users.map(u => (
+                                   <div key={u.id} className="bg-white p-4 rounded-2xl border border-gray-100 flex flex-col gap-2">
+                                       <div className="flex justify-between">
+                                           <div>
+                                               <p className="font-bold text-sm">{u.name}</p>
+                                               <p className="text-xs text-gray-400">@{u.username} (ID: {u.telegram_id})</p>
+                                               <p className="text-[10px] text-blue-500 font-bold">{u.role}</p>
+                                           </div>
+                                           {u.id !== user.id && <button onClick={() => handleDeleteUser(u.id)} className="text-red-500 text-xs font-bold uppercase border border-red-100 px-2 py-1 rounded h-fit">{t.deleteUser}</button>}
+                                       </div>
+                                       {u.id !== user.id && (
+                                           <div className="flex gap-1 mt-2">
+                                               {[Role.USER, Role.MANAGER, Role.ADMIN].map(r => (
+                                                   <button 
+                                                        key={r} 
+                                                        onClick={() => handleUserRoleChange(u.id, r)}
+                                                        className={`flex-1 py-1 rounded text-[9px] font-bold uppercase ${u.role === r ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-500'}`}
+                                                   >
+                                                       {r}
+                                                   </button>
+                                               ))}
+                                           </div>
+                                       )}
+                                   </div>
+                               ))}
+                           </div>
+                      </div>
+                  )}
+                  
+                  <div className="mt-8">
+                      <button type="button" onClick={() => handleRoleSwitch(Role.USER)} className="w-full bg-red-50 text-red-500 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest">{t.clientView}</button>
+                  </div>
               </div>
           );
 
