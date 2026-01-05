@@ -7,7 +7,7 @@ const ai = new GoogleGenAI({
 
 export const analyzeProductImage = async (base64Image: string) => {
   if (!process.env.API_KEY) {
-    console.warn("Gemini API key not found (process.env.API_KEY). Simulated detection returned.");
+    console.warn("Gemini API key not found (API_KEY). Simulated detection returned.");
     return { catalogType: 'FABRIC', tags: ['cotton', 'premium', 'plain'] };
   }
 

@@ -1,4 +1,3 @@
-
 import { Order, OrderStatus, ProductType, SearchLog, Expense, User } from '../types';
 
 type Lang = 'ru' | 'en' | 'ky';
