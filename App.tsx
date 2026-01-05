@@ -44,10 +44,12 @@ const App: React.FC = () => {
   const adminPaymentPhotoInputRef = useRef<HTMLInputElement>(null);
   const expenseReceiptRef = useRef<HTMLInputElement>(null);
   const profileInputRef = useRef<HTMLInputElement>(null);
+  const loginInputRef = useRef<HTMLInputElement>(null); // For simulation
   
   // -- State --
   const [users, setUsers] = useState<User[]>([MOCK_USER]);
   const [currentUserId, setCurrentUserId] = useState<string>(MOCK_USER.id);
+  const [isTelegramAuth, setIsTelegramAuth] = useState(false);
   
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
@@ -110,8 +112,15 @@ const App: React.FC = () => {
 
   const t = I18N[lang];
   const isManager = user.role === Role.MANAGER;
-  const isAdmin = user.role === Role.ADMIN || user.telegram_id === SUPER_ADMIN_ID;
-  const isSuperAdmin = user.telegram_id === SUPER_ADMIN_ID;
+  
+  // Super Admin Logic: Check ID OR Username (removing @ if present)
+  const cleanSuperAdminId = SUPER_ADMIN_ID.replace('@', '').toLowerCase();
+  const isSuperAdmin = 
+      String(user.telegram_id) === SUPER_ADMIN_ID || 
+      (user.username && user.username.toLowerCase() === cleanSuperAdminId);
+
+  // If user is super admin, they are effectively an ADMIN too
+  const isAdmin = user.role === Role.ADMIN || isSuperAdmin;
 
   // -- Initialization --
   useEffect(() => {
@@ -122,11 +131,16 @@ const App: React.FC = () => {
             window.Telegram.WebApp.expand();
             const tgUser = window.Telegram.WebApp.initDataUnsafe?.user;
             if (tgUser) {
+                setIsTelegramAuth(true);
                 const loggedUser = await api.loginOrRegister(tgUser);
-                // Override role if it is the SUPER ADMIN ID
-                if (String(tgUser.id) === SUPER_ADMIN_ID && loggedUser.role !== Role.ADMIN) {
-                    loggedUser.role = Role.ADMIN;
-                    await api.upsertUser(loggedUser);
+                
+                // Force Admin Role if matches SUPER_ADMIN_ID
+                const cleanTgUsername = (tgUser.username || '').toLowerCase();
+                if (String(tgUser.id) === SUPER_ADMIN_ID || cleanTgUsername === cleanSuperAdminId) {
+                    if (loggedUser.role !== Role.ADMIN) {
+                        loggedUser.role = Role.ADMIN;
+                        await api.upsertUser(loggedUser);
+                    }
                 }
                 setCurrentUserId(loggedUser.id);
             }
@@ -162,6 +176,38 @@ const App: React.FC = () => {
     };
     init();
   }, []);
+
+  // Manual Login Simulation
+  const handleSimulateLogin = async () => {
+    const usernameInput = loginInputRef.current?.value;
+    if (!usernameInput) return;
+    
+    // Fake Telegram User Structure
+    const fakeTgUser = {
+        id: Math.floor(Math.random() * 100000000),
+        first_name: 'Simulated',
+        last_name: 'User',
+        username: usernameInput
+    };
+
+    const loggedUser = await api.loginOrRegister(fakeTgUser);
+    
+    // Check if super admin
+    if (usernameInput.toLowerCase() === cleanSuperAdminId) {
+        loggedUser.role = Role.ADMIN;
+        await api.upsertUser(loggedUser);
+    }
+    
+    // Update local state
+    setUsers(prev => {
+        const exists = prev.find(u => u.id === loggedUser.id);
+        if (exists) return prev.map(u => u.id === loggedUser.id ? loggedUser : u);
+        return [...prev, loggedUser];
+    });
+    
+    setCurrentUserId(loggedUser.id);
+    alert(`Logged in as ${loggedUser.username} (${loggedUser.role})`);
+  };
 
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -682,11 +728,6 @@ const App: React.FC = () => {
       }
   };
 
-  // Deprecated for regular users, but kept for logic
-  const handleRoleSwitch = (newRole: Role) => {
-    // Disable manual switch for non-dev, rely on DB role
-  };
-
   const handleLangChange = (newLang: 'ru' | 'en' | 'ky') => {
     setLang(newLang);
     setSettings(prev => ({ ...prev, defaultLanguage: newLang }));
@@ -1162,7 +1203,7 @@ const App: React.FC = () => {
                         }}
                         className="w-5 h-5 rounded-md border-gray-300 text-blue-600 focus:ring-blue-500"
                     />
-                    <span className="text-xs font-bold uppercase text-gray-700">{t[`rep_${rt.toLowerCase()}` as keyof typeof t] || rt}</span>
+                    <span className="text-xs font-bold uppercase text-gray-700">{t[`rep_${rt.toLowerCase()}` as keyof typeof t] as string || rt}</span>
                 </label>
             ))}
         </div>
@@ -1340,6 +1381,23 @@ const App: React.FC = () => {
                  </div>
                  <div><h2 className="text-xl font-black text-gray-900">{user.brand || user.name}</h2><p className="text-xs font-bold text-gray-400">{user.username}</p><p className="text-xs font-bold text-gray-400">{user.phone}</p></div>
              </div>
+             
+             {/* Auth Debug / Simulation */}
+             <div className="bg-gray-100 p-4 rounded-2xl border border-gray-200">
+                <p className="text-[10px] font-black uppercase text-gray-400 tracking-widest mb-2">Development Mode</p>
+                {isTelegramAuth ? (
+                    <p className="text-xs font-bold text-green-600">Telegram Auth Active ✅</p>
+                ) : (
+                    <div className="space-y-2">
+                        <p className="text-xs text-red-500 font-bold">No Telegram Context Detected</p>
+                        <div className="flex gap-2">
+                            <input ref={loginInputRef} placeholder="Simulate TG Username" className="flex-1 text-xs p-2 rounded-lg border-none" />
+                            <button onClick={handleSimulateLogin} className="bg-gray-900 text-white px-3 py-1 text-xs font-bold rounded-lg uppercase">Simulate Login</button>
+                        </div>
+                    </div>
+                )}
+             </div>
+
              <div className="bg-gray-900 text-white p-6 rounded-[32px] shadow-xl shadow-gray-200">
                  <p className="text-[10px] font-black uppercase tracking-widest opacity-60 mb-1">{t.balance}</p>
                  <div className="flex justify-between items-end"><p className={`text-3xl font-black ${user.balance < 0 ? 'text-red-400' : 'text-green-400'}`}>${Math.abs(user.balance).toFixed(2)}<span className="text-xs align-top ml-1 opacity-60">{user.balance < 0 ? t.debt : t.overpayment}</span></p><button onClick={handleContactManager} className="bg-white/20 hover:bg-white/30 px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-colors">{t.managerContact}</button></div>
@@ -1349,11 +1407,6 @@ const App: React.FC = () => {
                  {renderOrderList(orders.filter(o => o.userId === user.id))}
                  {orders.filter(o => o.userId === user.id).length === 0 && <div className="text-center py-10 opacity-50"><span className="text-4xl block mb-2">📦</span><p className="text-sm font-bold text-gray-400">{t.historyEmpty}</p></div>}
              </div>
-             {/* Hide manual switch for prod */}
-             {isAdmin && <div className="bg-gray-50 p-6 rounded-[32px] border border-gray-100">
-                 <h3 className="text-lg font-black text-gray-900 mb-4">{t.settings}</h3>
-                 <button onClick={() => handleRoleSwitch(Role.ADMIN)} className="w-full bg-white border border-gray-200 p-4 rounded-xl text-left shadow-sm flex justify-between items-center group"><span className="font-bold text-gray-700">{t.switchRole} (Dev)</span><span className="text-gray-300 group-hover:text-blue-600 transition-colors">→</span></button>
-             </div>}
           </div>
         );
 
@@ -1482,7 +1535,7 @@ const App: React.FC = () => {
                   )}
                   
                   <div className="mt-8">
-                      <button type="button" onClick={() => handleRoleSwitch(Role.USER)} className="w-full bg-red-50 text-red-500 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest">{t.clientView}</button>
+                      <button type="button" onClick={() => setCurrentTab('catalog')} className="w-full bg-red-50 text-red-500 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest">{t.clientView}</button>
                   </div>
               </div>
           );

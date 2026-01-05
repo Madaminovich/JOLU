@@ -1,13 +1,13 @@
 import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({
-  apiKey: import.meta.env.VITE_API_KEY
+  apiKey: process.env.API_KEY
 });
 
 
 export const analyzeProductImage = async (base64Image: string) => {
   if (!process.env.API_KEY) {
-    console.warn("Gemini API key not found. Simulated detection returned.");
+    console.warn("Gemini API key not found (process.env.API_KEY). Simulated detection returned.");
     return { catalogType: 'FABRIC', tags: ['cotton', 'premium', 'plain'] };
   }
 
